@@ -49,11 +49,10 @@ results = defaultdict(list)
 with open(input_path, "r") as in_f:
     for line in tqdm(in_f, total=line_count):
         item = json.loads(line)
-        for generated_text in item["generated_texts"]:
+        for generated_text in item["generated_texts"][:1]:
             result = {
                 "data_source": f"{cfg['data']['dataset_name']}-{item['id']}",
                 "prompt": [
-                    {"role": "system", "content": item["system"]},
                     {"role": "user", "content": re.sub(pattern, '', generated_text)}
                 ],
                 "reward_model": {
@@ -66,6 +65,8 @@ with open(input_path, "r") as in_f:
                     "code": item["code"]
                 }
             }
+            if item["system"]:
+                result["prompt"].insert(0, {"role": "system", "content": item["system"]})
             if cfg["get_test_set"] and random.random() < cfg["test_ratio"]:
                 test_count += 1
                 if cfg["output_format"] == "jsonl":
@@ -90,10 +91,10 @@ if cfg["output_format"] == "parquet":
 elif cfg["output_format"] == "json":
     for k, v in results.items():
         with open(paths[k], "w") as f:
-            json.dump(f, v, indent=4, ensure_ascii=False)
+            json.dump(v, f, indent=4, ensure_ascii=False)
     if cfg["get_test_set"]:
         with open(test_path, "w") as f:
-            json.dump(f, fp=test_result, indent=4, ensure_ascii=False)
+            json.dump(test_result, f, indent=4, ensure_ascii=False)
             
 elif cfg["output_format"] == "jsonl":
     for v in files.values():

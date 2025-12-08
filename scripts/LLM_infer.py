@@ -1,41 +1,88 @@
 import json
 import yaml
-from transformers import AutoTokenizer
 import torch
 import os
 import sys
 import asyncio
 from tqdm.asyncio import tqdm as async_tqdm
+from tqdm import tqdm
 import openai
+import re
 
 cfg = None
 client = None
 
-async def process_prompt_async(args):
-    data_item, sampling_params = args
-    
+def remove_think_content(text: str) -> str:
+    # 使用非贪婪匹配，删除 <think>...</think> 之间的内容
+    cleaned_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return cleaned_text.strip()
+
+async def process_prompt_async(data_item, sampling_params):
     while True:
         try:
-            completion = await client.completions.create(
+            completion = await client.chat.completions.create(
                 model="default",
-                prompt=data_item["prompt"],
+                messages=data_item["messages"] if isinstance(data_item["messages"], list) else [{"role": "user", "content": data_item["messages"]}],
+                timeout=3600,
                 **sampling_params,
             )
-            data_item['generated_texts'] = [gen.text for gen in completion.choices]
+            data_item['generated_texts'] = [remove_think_content(gen.message.content) for gen in completion.choices]
             return data_item
         except Exception as e:
             # pass
             print(f"Retry: {e}", file=sys.stderr)
-            # await asyncio.sleep(1)
+            await asyncio.sleep(1)
+    data_item["generated_texts"] = ["ERROR"]
+    return data_item
 
 
-async def process_sync_in_async(data, sampling_params, output_path):
+async def process_in_parallel(data, sampling_params, output_path, batch_size=50):
+
+    global client
+    client = openai.AsyncClient(base_url=cfg["process"][sys.argv[1]]["url"], api_key=cfg["process"][sys.argv[1]]["api_key"])
+    sem = asyncio.Semaphore(batch_size)  # Control the maximum concurrency
+    results_buffer = []
+    total = len(data)
+
+    async def sem_task(item):
+        async with sem:
+            return await process_prompt_async(item, sampling_params)
+
+    with tqdm(total=total, desc="Inferring") as pbar, open(output_path, "a", encoding="utf-8") as out_file:
+        tasks = [asyncio.create_task(sem_task(item)) for item in data]
+
+        batch = []
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            batch.append(result)
+            pbar.update(1)
+
+            if len(batch) >= batch_size:
+                out_file.write("\n".join(json.dumps(r, ensure_ascii=False) for r in batch) + "\n")
+                batch.clear()
+
+        if batch:
+            out_file.write("\n".join(json.dumps(r, ensure_ascii=False) for r in batch) + "\n")
+            out_file.flush()
+
+    print()
+    print("="* 40)
+    print(f"Results for {sys.argv[1]} have been generated!\n")
+    print(f"Total: {len(data)} instances")
+    print(f"Output path: {output_path}")
+    print(f'Deployed url: {cfg["process"][sys.argv[1]]["url"]}')
+    print(f'Sampling Params: {json.dumps(sampling_params, ensure_ascii=False)}')
+    print(f'Inference batch size: {cfg["process"][sys.argv[1]]["bsz"]}')
+    print("="* 40)
+    print()
+
+
+
+async def process_local(data, sampling_params, output_path):
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import BeamSearchParams
     
-    if cfg["process"][sys.argv[1]]["generate_model_path"] == -1:
-        model_path = cfg["process"][sys.argv[1]]["generate_tokenizer_path"]
-    else:
+    if cfg["process"][sys.argv[1]]["generate_model_path"] != -1:
         model_path = cfg["process"][sys.argv[1]]["generate_model_path"]
     
     # 配置tensor并行
@@ -51,20 +98,22 @@ async def process_sync_in_async(data, sampling_params, output_path):
         gpu_memory_utilization=cfg["process"][sys.argv[1]]["gpu_memory_utilization"]
     )
     
-    prompts = [item['prompt'] for item in data]
+    from transformers import AutoTokenizer
+    tokenizer= AutoTokenizer.from_pretrained(model_path, use_fast=False)
+
+    prompts = [tokenizer.apply_chat_template(item["messages"], tokenize=False, add_generation_prompt=True) for item in data]
     outputs = llm.generate(prompts, SamplingParams(**sampling_params))
     
     with open(output_path, "w", encoding="utf-8") as f:
         for i, output in enumerate(outputs):
-            data[i]['generated_texts'] = [gen.text for gen in output.outputs]
+            data[i]['generated_texts'] = [remove_think_content(gen.text) for gen in output.outputs]
             f.write(json.dumps(data[i], ensure_ascii=False) + "\n")
-    
+
     print()
     print("="* 40)
     print("Results for template and code generation have been generated!")
     print(f"Total: {len(data)} instances")
     print(f"Output path: {output_path}")
-    print(f'Deployed tokenizer: {os.path.basename(cfg["process"][sys.argv[1]]["generate_tokenizer_path"])}')
     print(f'Deployed model: {os.path.basename(model_path)}')
     print("="* 40)
     print()
@@ -78,15 +127,13 @@ async def main():
     from utils import set_seed
     set_seed(cfg["process"]["seed"])
 
-    tokenizer_path = cfg["process"][sys.argv[1]]["generate_tokenizer_path"]
     if sys.argv[1] == "template_and_code_generation":
         input_path = os.path.join(cfg["process"]["tmp_folder"], sys.argv[1], f'{cfg["data"]["dataset_name"]}_prompt.jsonl')
         output_path = os.path.join(cfg["process"]["tmp_folder"], sys.argv[1], f'{cfg["data"]["dataset_name"]}_generated.jsonl')
     else:
         input_path = os.path.join(cfg["process"]["tmp_folder"], sys.argv[1], f'{cfg["data"]["dataset_name"]}_{"|".join(str(item) for item in cfg["process"]["controllable_perturbation"]["alpha_list"])}_{cfg["process"]["controllable_perturbation"]["sample_times"]}_prompt.jsonl')
         output_path = os.path.join(cfg["process"]["tmp_folder"], sys.argv[1], f'{cfg["data"]["dataset_name"]}_{"|".join(str(item) for item in cfg["process"]["controllable_perturbation"]["alpha_list"])}_{cfg["process"]["controllable_perturbation"]["sample_times"]}_generated.jsonl')
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+       
     is_parallel = cfg["process"][sys.argv[1]]["is_parallel"]
     
     
@@ -98,43 +145,21 @@ async def main():
             data.append(data_item)
     
     sampling_params = cfg["process"][sys.argv[1]]['sampling-params']
-    sampling_params["stop"] =  [token for token in tokenizer.all_special_tokens if "end" in token]
 
     if is_parallel:
-        tasks = []
-        line_count = len(data)
-        batch_size = cfg["process"][sys.argv[1]]["bsz"]
-        
-        global client
-        client = openai.AsyncClient(base_url=cfg["process"][sys.argv[1]]["url"], api_key=cfg["process"][sys.argv[1]]["api_key"])
-        
-        with open(output_path, "w", encoding="utf-8") as f:
-            for i, item in enumerate(data, 1):
-                tasks.append(process_prompt_async((item, sampling_params)))
-                
-                if i % batch_size == 0 or i == line_count:
-                    results = await async_tqdm.gather(
-                        *tasks, 
-                        desc=f"[{i} / {line_count}]", 
-                        total=len(tasks)
-                    )
-                    f.write('\n'.join([json.dumps(it, ensure_ascii=False) for it in results]) + '\n')
-                    tasks = []
-        
-        print()
-        print("="* 40)
-        print(f"Results for {sys.argv[1]} have been generated!\n")
-        print(f"Total: {len(data)} instances")
-        print(f"Output path: {output_path}")
-        print(f'Deployed tokenizer: {os.path.basename(cfg["process"][sys.argv[1]]["generate_tokenizer_path"])}')
-        print(f'Deployed url: {cfg["process"][sys.argv[1]]["url"]}')
-        print(f'Sampling Params: {json.dumps(sampling_params, ensure_ascii=False)}')
-        print(f'Inference batch size: {cfg["process"][sys.argv[1]]["bsz"]}')
-        print("="* 40)
-        print()
+        await process_in_parallel(
+            data=data,
+            sampling_params=sampling_params,
+            output_path=output_path,
+            batch_size=cfg["process"][sys.argv[1]]["bsz"]
+        )
                     
     else:
-        await process_sync_in_async(data, sampling_params, output_path)
+        await process_local(
+            data, 
+            sampling_params, 
+            output_path
+        )
 
 if __name__ == "__main__":
     asyncio.run(main())

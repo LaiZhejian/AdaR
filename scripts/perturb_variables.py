@@ -59,6 +59,21 @@ def check_validity(value, old_value):
     except ValueError:
         return False
 
+# @timeout(cfg["process"]["controllable_perturbation"]["timeout_seconds_per_sample"])
+# def python_run(code):
+#     local_env = {
+#         '__result__': "",  # 存储 print 的内容
+#     }
+#     def custom_print(*args, **kwargs):
+#     # 将所有参数转换为字符串并拼接
+#         sep = kwargs.get('sep', ' ')
+#         end = kwargs.get('end', '\n')
+#         output = sep.join(str(arg) for arg in args) + end
+#         local_env['__result__'] += output
+#     local_env['print'] = custom_print
+#     exec(code, local_env)
+#     return local_env["__result__"]
+
 class SafeExecutor:
     def __init__(self, mock_input_func):
         self.mock_input = mock_input_func
@@ -77,6 +92,9 @@ class SafeExecutor:
 
     @staticmethod
     def _worker(task_q, result_q, mock_input_func):
+        """
+        子进程：设置 builtins + 自定义 print + exec 代码，返回结果字符串
+        """
         import builtins as _builtins
 
         # 覆写 builtins
@@ -147,6 +165,8 @@ class SafeExecutor:
         if self._proc.is_alive():
             self._proc.join()
 
+
+# 全局复用一个 Executor
 _executor = None
 
 def get_executor():
@@ -160,21 +180,6 @@ def python_run(code):
     executor = get_executor()
     timeout_seconds = cfg["process"]["controllable_perturbation"]["timeout_seconds_per_sample"]
     return executor.run(code, timeout_seconds)
-
-# @timeout(cfg["process"]["controllable_perturbation"]["timeout_seconds_per_sample"])
-# def python_run(code):
-#     local_env = {
-#         '__result__': "",  # 存储 print 的内容
-#     }
-#     def custom_print(*args, **kwargs):
-#     # 将所有参数转换为字符串并拼接
-#         sep = kwargs.get('sep', ' ')
-#         end = kwargs.get('end', '\n')
-#         output = sep.join(str(arg) for arg in args) + end
-#         local_env['__result__'] += output
-#     local_env['print'] = custom_print
-#     exec(code, local_env)
-#     return local_env["__result__"]
 
 def randomize_value(original_value, max_fluct=1.0, upper_bound=10**9):
     """
@@ -366,12 +371,15 @@ def randomize_code_multiple_times(times, group_r, *args, **kwargs):
     start_total = time.time()
 
     for _ in range(times):
+        # 总时间检查
         if time.time() - start_total > total_timeout:
+            # 超出总时间直接结束
             break
 
         try:
             r = randomize_code(*args, **kwargs)
         except TimeoutError:
+            # 单次超时，略过这个样本，继续下一个
             continue
 
         if r and 'new_ans' in r:
@@ -406,8 +414,9 @@ with open(input_path, "r") as f:
 
 process_func = partial(process_item, others=None)
 max_workers = cfg["process"]["controllable_perturbation"]["max_workers"]
+print(type(max_workers))
 if max_workers == -1:
-    max_workers=os.cpu_count() // 2, 
+    max_workers=os.cpu_count() // 2
 
 process_results = process_map(
     process_func,

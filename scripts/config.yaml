@@ -1,13 +1,13 @@
 data:
-  dataset_name: tmp
+  dataset_name: orca-80K
   # seed data
-  source_path: ../data/raw/dapo_math_15k_cot.json
-  system: "Please reason step by step, and put your final answer within \\boxed{}."
+  source_path: ../data/raw/orca_80k.json
+  system: ""
 
 target_dir: ../data/result
 output_format: parquet # jsonl, json or parquet
 get_test_set: False
-test_ratio: 0.02 # The proportion of the test set
+test_ratio: 0.03 # The proportion of the test set
 
 process:
   seed: 26
@@ -27,13 +27,13 @@ process:
     tensor_parallel_size: -1 # -1 means number of all available gpus
     gpu_memory_utilization: 0.95
     # For Remote Parallel
-    url: ""
+    url: "http://10.114.179.123:8417/v1"
     api_key: "EMPTY"
     bsz: 1024
 
   controllable_perturbation:
     alpha_list: [5] # Optional values of the perturbation magnitude
-    sample_times: 4 # The number of perturbations for each sample
+    sample_times: 16 # The number of perturbations for each sample
     timeout_seconds_total: 180 # If a all perturbatio for more than the specified time, it is regarded as an error
     timeout_seconds_per_sample: 2 # If a one perturbation runs for more than the specified time, it is regarded as an error
     retry_times_inner: 10 # retry times for valid perturbation
@@ -47,14 +47,14 @@ process:
     sampling-params:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 32768
+      max_tokens: 16384
       n: 5
     # For Local Serial
     generate_model_path: ""
     tensor_parallel_size: -1 # -1 means number of all available gpus
     gpu_memory_utilization: 0.95
     # For Remote Parallel
-    url: ""
+    url: "http://10.114.179.123:8417/v1"
     api_key: "EMPTY"
     bsz: 1024
 
@@ -64,14 +64,14 @@ process:
     sampling-params:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 32768
-      n: 5
+      max_tokens: 16384
+      n: 16
     # For Local Serial
     generate_model_path: ""
     tensor_parallel_size: -1 # -1 means number of all available gpus
     gpu_memory_utilization: 0.95
     # For Remote Parallel
-    url: ""
+    url: "http://10.114.179.123:8417/v1"
     api_key: "EMPTY"
     bsz: 1024
 

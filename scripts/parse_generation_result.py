@@ -2,10 +2,13 @@
 import contextlib
 from io import StringIO
 import re
+import subprocess
 import json
 from tqdm import tqdm
 import os
 from contextlib import contextmanager
+import signal
+import threading
 import yaml
 
 with open('config.yaml', 'r') as file:
@@ -136,6 +139,7 @@ class SafeExecutor:
                 return output
 
     def close(self):
+        """优雅关闭子进程（非必须，但你可以在程序结束前调用）"""
         try:
             self._task_q.put(None)
         except:
@@ -187,7 +191,7 @@ def extract_content(item):
         python_generation_fault_count += 1
     elif template_content is None:
         template_generation_fault_count += 1 
-    elif item["query"].count(' ') == 0 or abs(template_content.count(' ') - item["query"].count(' ')) / item["query"].count(' ') > 1:
+    elif abs(template_content.count(' ') - item["query"].count(' ')) > 0.5 * min(item["query"].count(' '), template_content.count(' ')):
         template_generation_mistake_count += 1
     else:
         python_result = runcode(python_code)
